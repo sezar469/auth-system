@@ -1,0 +1,219 @@
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const otpGenerator = require("otp-generator");
+const User = require("./models/User");
+
+const app = express();
+app.use(express.json());
+
+// TEMP STORAGE
+const otpStore = {};
+const loginAttempts = {};
+const captchaStore = {};
+
+// PASSWORD VALIDATION
+function validatePassword(password) {
+  return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/.test(password);
+}
+
+// CONNECT DATABASE
+mongoose.connect("mongodb+srv://SEZAR:Solowise506@cluster0.ep2fodp.mongodb.net/boosthub")
+.then(() => console.log("MongoDB Connected ✔"))
+.catch(err => console.log("DB Error:", err));
+
+// HOME
+app.get("/", (req, res) => {
+  res.send("Auth System Running 🚀");
+});
+
+// ======================
+// CAPTCHA
+// ======================
+app.get("/captcha", (req, res) => {
+  const num1 = Math.floor(Math.random() * 10);
+  const num2 = Math.floor(Math.random() * 10);
+
+  const answer = num1 + num2;
+  const captchaId = Date.now().toString();
+
+  captchaStore[captchaId] = answer;
+
+  res.json({
+    captchaId,
+    question: `What is ${num1} + ${num2}?`
+  });
+});
+
+// ======================
+// SIGNUP
+// ======================
+app.post("/signup", async (req, res) => {
+  try {
+    const { email, phone, password, captchaId, captchaAnswer } = req.body;
+
+    if (!captchaStore[captchaId]) {
+      return res.status(400).send("Invalid CAPTCHA");
+    }
+
+    if (parseInt(captchaAnswer) !== captchaStore[captchaId]) {
+      return res.status(400).send("Incorrect CAPTCHA");
+    }
+
+    delete captchaStore[captchaId];
+
+    if (!email && !phone) {
+      return res.status(400).send("Email or phone required");
+    }
+
+    if (!validatePassword(password)) {
+      return res.status(400).send("Weak password");
+    }
+
+    const existingUser = await User.findOne({
+      $or: [{ email }, { phone }]
+    });
+
+    if (existingUser) {
+      return res.status(400).send("User already exists");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = new User({ email, phone, password: hashedPassword });
+
+    await user.save();
+
+    res.send("User created successfully");
+
+  } catch {
+    res.status(500).send("Server error");
+  }
+});
+
+// ======================
+// LOGIN (STEP 1)
+// ======================
+app.post("/login", async (req, res) => {
+  try {
+    const { email, phone, password, captchaId, captchaAnswer } = req.body;
+
+    if (!captchaStore[captchaId]) {
+      return res.status(400).send("Invalid CAPTCHA");
+    }
+
+    if (parseInt(captchaAnswer) !== captchaStore[captchaId]) {
+      return res.status(400).send("Incorrect CAPTCHA");
+    }
+
+    delete captchaStore[captchaId];
+
+    const user = await User.findOne({
+      $or: [{ email }, { phone }]
+    });
+
+    if (!user) {
+      return res.status(400).send("User not found");
+    }
+
+    if (!loginAttempts[user._id]) {
+      loginAttempts[user._id] = { count: 0, lockUntil: null };
+    }
+
+    if (
+      loginAttempts[user._id].lockUntil &&
+      Date.now() < loginAttempts[user._id].lockUntil
+    ) {
+      return res.status(403).send("Account locked. Try later.");
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      loginAttempts[user._id].count++;
+
+      if (loginAttempts[user._id].count >= 5) {
+        loginAttempts[user._id].lockUntil = Date.now() + 10 * 60 * 1000;
+        return res.status(403).send("Too many attempts. Locked 10 mins.");
+      }
+
+      return res.status(400).send("Incorrect password");
+    }
+
+    loginAttempts[user._id] = { count: 0, lockUntil: null };
+
+    const otp = otpGenerator.generate(6, {
+      upperCaseAlphabets: false,
+      lowerCaseAlphabets: false,
+      specialChars: false
+    });
+
+    otpStore[user._id] = {
+      otp,
+      expires: Date.now() + 5 * 60 * 1000
+    };
+
+    console.log("OTP:", otp);
+
+    res.json({
+      message: "OTP sent",
+      userId: user._id
+    });
+
+  } catch {
+    res.status(500).send("Server error");
+  }
+});
+
+// ======================
+// VERIFY OTP
+// ======================
+app.post("/verify-otp", (req, res) => {
+  const { userId, otp } = req.body;
+
+  const stored = otpStore[userId];
+
+  if (!stored) return res.status(400).send("OTP not found");
+
+  if (stored.otp !== otp) return res.status(400).send("Invalid OTP");
+
+  if (Date.now() > stored.expires)
+    return res.status(400).send("OTP expired");
+
+  delete otpStore[userId];
+
+  const token = jwt.sign({ userId }, "SECRET_KEY_123", { expiresIn: "1h" });
+
+  res.json({ message: "Login successful", token });
+});
+
+// ======================
+// AUTH
+// ======================
+function authMiddleware(req, res, next) {
+  const token = req.headers.authorization;
+
+  if (!token) return res.status(401).send("No token");
+
+  try {
+    const verified = jwt.verify(token, "SECRET_KEY_123");
+    req.user = verified;
+    next();
+  } catch {
+    res.status(400).send("Invalid token");
+  }
+}
+
+// ======================
+// PROFILE
+// ======================
+app.get("/profile", authMiddleware, async (req, res) => {
+  const user = await User.findById(req.user.userId).select("-password");
+  res.json(user);
+});
+
+// START SERVER
+app.listen(5000, () => {
+  console.log("Server running on port 5000");
+});
