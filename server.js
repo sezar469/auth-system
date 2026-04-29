@@ -8,22 +8,30 @@ const User = require("./models/User");
 const app = express();
 app.use(express.json());
 
+// ======================
 // TEMP STORAGE
+// ======================
 const otpStore = {};
 const loginAttempts = {};
 const captchaStore = {};
 
+// ======================
 // PASSWORD VALIDATION
+// ======================
 function validatePassword(password) {
   return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/.test(password);
 }
 
+// ======================
 // CONNECT DATABASE
-mongoose.connect("mongodb+srv://SEZAR:Solowise506@cluster0.ep2fodp.mongodb.net/boosthub")
+// ======================
+mongoose.connect(process.env.MONGO_URI)
 .then(() => console.log("MongoDB Connected ✔"))
 .catch(err => console.log("DB Error:", err));
 
+// ======================
 // HOME
+// ======================
 app.get("/", (req, res) => {
   res.send("Auth System Running 🚀");
 });
@@ -53,6 +61,7 @@ app.post("/signup", async (req, res) => {
   try {
     const { email, phone, password, captchaId, captchaAnswer } = req.body;
 
+    // CAPTCHA CHECK
     if (!captchaStore[captchaId]) {
       return res.status(400).send("Invalid CAPTCHA");
     }
@@ -63,6 +72,7 @@ app.post("/signup", async (req, res) => {
 
     delete captchaStore[captchaId];
 
+    // VALIDATION
     if (!email && !phone) {
       return res.status(400).send("Email or phone required");
     }
@@ -81,13 +91,18 @@ app.post("/signup", async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = new User({ email, phone, password: hashedPassword });
+    const user = new User({
+      email,
+      phone,
+      password: hashedPassword
+    });
 
     await user.save();
 
     res.send("User created successfully");
 
-  } catch {
+  } catch (err) {
+    console.log(err);
     res.status(500).send("Server error");
   }
 });
@@ -99,6 +114,7 @@ app.post("/login", async (req, res) => {
   try {
     const { email, phone, password, captchaId, captchaAnswer } = req.body;
 
+    // CAPTCHA CHECK
     if (!captchaStore[captchaId]) {
       return res.status(400).send("Invalid CAPTCHA");
     }
@@ -117,6 +133,7 @@ app.post("/login", async (req, res) => {
       return res.status(400).send("User not found");
     }
 
+    // LOGIN ATTEMPTS
     if (!loginAttempts[user._id]) {
       loginAttempts[user._id] = { count: 0, lockUntil: null };
     }
@@ -141,8 +158,10 @@ app.post("/login", async (req, res) => {
       return res.status(400).send("Incorrect password");
     }
 
+    // RESET ATTEMPTS
     loginAttempts[user._id] = { count: 0, lockUntil: null };
 
+    // GENERATE OTP
     const otp = otpGenerator.generate(6, {
       upperCaseAlphabets: false,
       lowerCaseAlphabets: false,
@@ -161,7 +180,8 @@ app.post("/login", async (req, res) => {
       userId: user._id
     });
 
-  } catch {
+  } catch (err) {
+    console.log(err);
     res.status(500).send("Server error");
   }
 });
@@ -183,13 +203,20 @@ app.post("/verify-otp", (req, res) => {
 
   delete otpStore[userId];
 
-  const token = jwt.sign({ userId }, "SECRET_KEY_123", { expiresIn: "1h" });
+  const token = jwt.sign(
+    { userId },
+    process.env.JWT_SECRET,
+    { expiresIn: "1h" }
+  );
 
-  res.json({ message: "Login successful", token });
+  res.json({
+    message: "Login successful",
+    token
+  });
 });
 
 // ======================
-// AUTH
+// AUTH MIDDLEWARE
 // ======================
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization;
@@ -197,7 +224,7 @@ function authMiddleware(req, res, next) {
   if (!token) return res.status(401).send("No token");
 
   try {
-    const verified = jwt.verify(token, "SECRET_KEY_123");
+    const verified = jwt.verify(token, process.env.JWT_SECRET);
     req.user = verified;
     next();
   } catch {
@@ -213,7 +240,11 @@ app.get("/profile", authMiddleware, async (req, res) => {
   res.json(user);
 });
 
-// START SERVER
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
+// ======================
+// START SERVER (IMPORTANT)
+// ======================
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
